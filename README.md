@@ -1,2 +1,2 @@
 # pricing
-pricing and margin analytics resources
+Pricing and margin analytics resources for Revology Analytics subscribers.
