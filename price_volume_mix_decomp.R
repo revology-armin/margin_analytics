@@ -19,37 +19,11 @@
 
 library(easypackages)
 
-mypackages <- c('tidyverse','gt', 'anytime')
+mypackages <- c('tidyverse','gt', 'anytime', 'cowplot', 'magick')
 packages(mypackages)
 
 
-# 1. Baseline functions ---------------------------------------------------
-
-
-header_changes = function(mydata){
-  setnames(mydata, names(mydata), tolower(names(mydata)))
-  setnames(mydata, names(mydata), gsub(" ","_", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("_(sum)","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("_(agg)","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("_(avg)","_avg", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("(c)","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("$","dollar_volume", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("%","pct", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("w/o","without", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("-","_", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("&","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("/","_", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("\\(","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub("\\)","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), gsub(".","", names(mydata), fixed = TRUE))
-  setnames(mydata, names(mydata), iconv(names(mydata), "UTF-8","ASCII", sub=""))
-}
-
-
-`%ni%` = Negate('%in%')
-
-
-# 2. Create some fake transactional data to work with-------------------------------------------
+# 1. Create some fake transactional data to work with-------------------------------------------
 
 # Feel free to import your own data to run a Revenue or Gross Profit$ decomposition
 
@@ -103,12 +77,13 @@ data = expand_grid(channel = channel, customer_segment = customers, brand = bran
 
 
                
-# 3. Top-down Gross Profit $ (GP$) and Revenue Decomposition -------------------------------------------
+# 2. Top-down Gross Profit $ (GP$) and Revenue Decomposition -------------------------------------------
 
-# This is the recommended method if you want to peel back the onion on key drivers of your business performance changes and make adjustments                                 
+# This is the recommended method if you want to peel back the onion on key drivers of your business performance changes and make adjustments  
+# You can use this 
 
 
-# GP$ performance decomp at Level 1 (Channel) ----
+# 2-a) GP$ performance decomp at Level 1 (Channel) ----
 
 # Decomposing total company GP$ and Revenue changes into price, cost, volume and channel mix impacts
 
@@ -133,29 +108,25 @@ channel_level_decomp = data %>% group_by(channel) %>%
                                   revenue_volume_impact = (current_units - base_units) * (sum(base_revenue) / sum(base_units)),
                                   price_impact = (current_price - base_price) * current_units,
                                   cost_impact = -(current_cost_per_unit - base_cost_per_unit) * current_units) %>% ungroup() %>%
+                              mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
                                 select(channel, base_gross_profit_total, current_gross_profit_total, base_revenue, current_revenue, 
-                                        gp_mix_impact:cost_impact) 
+                                        gp_mix_impact:gross_profit_change)
+                                    
 
 
-channel_level_decomp_summary =   channel_level_decomp  %>% add_row(channel = 'Company Total',
-                                  base_gross_profit_total = sum(channel_level_decomp$base_gross_profit_total),
-                                  current_gross_profit_total = sum(channel_level_decomp$current_gross_profit_total),
-                                  base_revenue = sum(channel_level_decomp$base_revenue),
-                                  current_revenue = sum(channel_level_decomp$current_revenue),
-                                  gp_mix_impact = sum(channel_level_decomp$gp_mix_impact),
-                                  gp_volume_impact = sum(channel_level_decomp$gp_volume_impact),
-                                  revenue_mix_impact = sum(channel_level_decomp$revenue_mix_impact),
-                                  revenue_volume_impact = sum(channel_level_decomp$revenue_volume_impact),
-                                  price_impact = sum(channel_level_decomp$price_impact),
-                                  cost_impact = sum(channel_level_decomp$cost_impact)) %>% arrange(-base_gross_profit_total) %>%
-                                  mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
-                                  mutate_if(is.numeric, ~ round(.x, 0))
+channel_level_decomp_summary = channel_level_decomp %>% summarise_if(is.numeric, sum, na.rm = T) %>% 
+                      mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
+                      mutate(channel = 'Company Total') %>% select(channel, everything()) %>%
+                            bind_rows(channel_level_decomp) %>% 
+                                  mutate_if(is.numeric, ~ round(.x, 0)) %>%
+                    mutate(gross_profit_change = if_else(channel == 'Company Total', gross_profit_change, as.numeric(NA)))
+                    
                                   
                                        
 
-# Let's visualize Level 1 (Channel) GP $ decomp
+# Visual of Level 1 (Channel) GP $ decomp ----
 
-channel_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
+l1_visual <- channel_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
                                   select(channel, base_gross_profit_total, current_gross_profit_total, gross_profit_change, everything()) %>%
   gt(rowname_col = 'channel') %>% cols_align(align = 'center') %>%
   tab_spanner(label = "GP$ Change Decomposition", columns = c('price_impact', 'cost_impact', 'gp_volume_impact', 'gp_mix_impact')) %>%
@@ -174,44 +145,18 @@ channel_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_reven
     gp_mix_impact= 'Channel Mix'
   ) %>%
   tab_header(
-    title = md("*Price-Cost-Volume-Mix Decomposition of Gross Profit $ Performance*")
-  )
+    title = md("Price-Cost-Volume-Mix Decomposition of Gross Profit $ Performance")); l1_visual
 
 
-# Let's visualize Level 1 (Channel) Revenue decomp
-
-# continue from here with revenue decomp visualization
-channel_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
-  select(channel, base_gross_profit_total, current_gross_profit_total, gross_profit_change, everything()) %>%
-  gt(rowname_col = 'channel') %>% cols_align(align = 'center') %>%
-  tab_spanner(label = "GP$ Change Decomposition", columns = c('price_impact', 'cost_impact', 'gp_volume_impact', 'gp_mix_impact')) %>%
-  fmt_currency(
-    columns = vars(base_gross_profit_total, current_gross_profit_total, gross_profit_change, price_impact, cost_impact, gp_volume_impact, gp_mix_impact),
-    currency = "USD",
-    decimals = 0
-  ) %>% 
-  cols_label(
-    base_gross_profit_total = 'GP$ in Base Period',
-    current_gross_profit_total = 'GP$ in Current Period',
-    gross_profit_change  = 'GP$ Change',
-    price_impact = 'Price',
-    cost_impact= 'Cost',
-    gp_volume_impact= 'Volume',
-    gp_mix_impact= 'Channel Mix'
-  ) %>%
-  tab_header(
-    title = md("*Price-Cost-Volume-Mix Decomposition of Gross Profit $ Performance*")
-  )  
-  
 
 
-# GP$ performance decomp at Level 2 (Customer) ----
+# 2-b) GP$ performance decomp at Level 2 (Customer Segment) ----
 
-# Decomposing channel level GP$ and Revenue changes into price, cost, volume and product mix impacts
+# Decomposing channel level GP$ and Revenue changes into price, cost, volume and product mix impacts by Customer Segment
 
-# Pick a channel to analyze
-
+# Pick a channel to dive deeper
 channel_filter = 'Grocery'
+
 
 customer_level_decomp = data %>% filter(channel == channel_filter) %>% group_by(customer_segment) %>%
   summarise_at(c('base_units','current_units',
@@ -234,30 +179,26 @@ customer_level_decomp = data %>% filter(channel == channel_filter) %>% group_by(
          revenue_volume_impact = (current_units - base_units) * (sum(base_revenue) / sum(base_units)),
          price_impact = (current_price - base_price) * current_units,
          cost_impact = -(current_cost_per_unit - base_cost_per_unit) * current_units) %>% ungroup() %>%
-  select(customer_segment, base_gross_profit_total, current_gross_profit_total, base_revenue, current_revenue, 
-         gp_mix_impact:cost_impact) 
-
-
-customer_level_decomp_summary =   customer_level_decomp  %>% add_row(customer_segment = 'All Segments',
-                                                                   base_gross_profit_total = sum(customer_level_decomp$base_gross_profit_total),
-                                                                   current_gross_profit_total = sum(customer_level_decomp$current_gross_profit_total),
-                                                                   base_revenue = sum(customer_level_decomp$base_revenue),
-                                                                   current_revenue = sum(customer_level_decomp$current_revenue),
-                                                                   gp_mix_impact = sum(customer_level_decomp$gp_mix_impact),
-                                                                   gp_volume_impact = sum(customer_level_decomp$gp_volume_impact),
-                                                                   revenue_mix_impact = sum(customer_level_decomp$revenue_mix_impact),
-                                                                   revenue_volume_impact = sum(customer_level_decomp$revenue_volume_impact),
-                                                                   price_impact = sum(customer_level_decomp$price_impact),
-                                                                   cost_impact = sum(customer_level_decomp$cost_impact)) %>% arrange(-base_gross_profit_total) %>%
   mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
-  mutate_if(is.numeric, ~ round(.x, 0))
+  select(customer_segment, base_gross_profit_total, current_gross_profit_total, base_revenue, current_revenue, 
+         gp_mix_impact:gross_profit_change)
+
+
+
+customer_level_decomp_summary = customer_level_decomp %>% summarise_if(is.numeric, sum, na.rm = T) %>% 
+  mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
+  mutate(customer_segment = 'All Customers') %>% select(customer_segment, everything()) %>%
+  bind_rows(customer_level_decomp) %>% 
+  mutate_if(is.numeric, ~ round(.x, 0)) %>%
+  mutate(gross_profit_change = if_else(customer_segment == 'All Customers', gross_profit_change, as.numeric(NA)))
 
 
 
 
-# Let's visualize Level 2 (Customer) GP $ decomp
 
-customer_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
+# Visual of Level 2 (Customer) GP $ decomp ----
+
+l2_visual <- customer_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
   select(customer_segment, base_gross_profit_total, current_gross_profit_total, gross_profit_change, everything()) %>%
   gt(rowname_col = 'customer_segment') %>% cols_align(align = 'center') %>%
   tab_spanner(label = "GP$ Change Decomposition", columns = c('price_impact', 'cost_impact', 'gp_volume_impact', 'gp_mix_impact')) %>%
@@ -273,27 +214,160 @@ customer_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_reve
     price_impact = 'Price',
     cost_impact= 'Cost',
     gp_volume_impact= 'Volume',
-    gp_mix_impact= 'Customer Mix'
+    gp_mix_impact= 'Product Mix'
   ) %>%
   tab_header(
-    title = md(paste("GP$ Decomposition of ", channel_filter, "channel"))
-  )
+    title = md(paste("Price-Cost-Volume-Mix Decomposition of ", channel_filter, "channel"))); l2_visual
 
 
 
 
 
 
+# 2-c) GP$ performance decomp at Level 3 (Brand) ----
+
+# Decomposing customer level GP$ and Revenue changes into price, cost, volume and product mix impacts by Brand
+
+# Pick a customer segment to dive deeper
+customer_filter = 'Customer C'
+
+
+brand_level_decomp = data %>% filter(channel == channel_filter, customer_segment == customer_filter) %>% group_by(brand) %>%
+  summarise_at(c('base_units','current_units',
+                 'base_revenue', 'current_revenue',
+                 'base_cost_total','current_cost_total',
+                 'base_gross_profit_total','current_gross_profit_total'), sum, na.rm = T) %>%
+  mutate(base_cost_per_unit = base_cost_total / base_units ,
+         current_cost_per_unit = current_cost_total / current_units,
+         base_gp_per_unit = base_gross_profit_total / base_units ,
+         current_gp_per_unit = current_gross_profit_total / current_units,
+         base_price = base_revenue / base_units ,
+         current_price = current_revenue / current_units,
+         base_mix = base_units / sum(base_units),
+         current_mix = current_units / sum(current_units),
+         fcst_units = base_mix * sum(current_units),
+         delta_to_fcst_units = current_units - fcst_units,
+         gp_mix_impact = (base_gp_per_unit - sum(base_gross_profit_total) / sum(base_units)) * delta_to_fcst_units,
+         gp_volume_impact = (current_units - base_units) * (sum(base_gross_profit_total) / sum(base_units)),
+         revenue_mix_impact = (base_price - sum(base_revenue) / sum(base_units)) * delta_to_fcst_units,
+         revenue_volume_impact = (current_units - base_units) * (sum(base_revenue) / sum(base_units)),
+         price_impact = (current_price - base_price) * current_units,
+         cost_impact = -(current_cost_per_unit - base_cost_per_unit) * current_units) %>% ungroup() %>%
+  mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
+  select(brand, base_gross_profit_total, current_gross_profit_total, base_revenue, current_revenue, 
+         gp_mix_impact:gross_profit_change)
+
+
+
+brand_level_decomp_summary = brand_level_decomp %>% summarise_if(is.numeric, sum, na.rm = T) %>% 
+  mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
+  mutate(brand = 'All Brands') %>% select(brand, everything()) %>%
+  bind_rows(brand_level_decomp) %>% 
+  mutate_if(is.numeric, ~ round(.x, 0))  %>%
+  mutate(gross_profit_change = if_else(brand == 'All Brands', gross_profit_change, as.numeric(NA)))
+
+
+
+# Visual of Level 3 (Brand) GP $ decomp ----
+
+l3_visual <- brand_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
+  select(brand, base_gross_profit_total, current_gross_profit_total, gross_profit_change, everything()) %>%
+  gt(rowname_col = 'brand') %>% cols_align(align = 'center') %>%
+  tab_spanner(label = "GP$ Change Decomposition", columns = c('price_impact', 'cost_impact', 'gp_volume_impact', 'gp_mix_impact')) %>%
+  fmt_currency(
+    columns = vars(base_gross_profit_total, current_gross_profit_total, gross_profit_change, price_impact, cost_impact, gp_volume_impact, gp_mix_impact),
+    currency = "USD",
+    decimals = 0
+  ) %>% 
+  cols_label(
+    base_gross_profit_total = 'GP$ in Base Period',
+    current_gross_profit_total = 'GP$ in Current Period',
+    gross_profit_change  = 'GP$ Change',
+    price_impact = 'Price',
+    cost_impact= 'Cost',
+    gp_volume_impact= 'Volume',
+    gp_mix_impact= 'Product Mix'
+  ) %>%
+  tab_header(
+    title = md(paste("Price-Cost-Volume-Mix Decomposition of ", customer_filter, " segment"))); l3_visual 
 
 
 
 
 
 
+# 2-d) GP$ performance decomp at Level 4 (Product) ----
+
+# Decomposing Brand level GP$ and Revenue changes into price, cost, volume and product mix impacts by Product
+
+# Pick a customer segment to dive deeper
+brand_filter = 'Good'
 
 
-# 4. Bottoms-up Gross Profit $ and Revenue Decomposition -------------------------------------------
+product_level_decomp = data %>% filter(channel == channel_filter, customer_segment == customer_filter, brand == brand_filter) %>% group_by(product) %>%
+  summarise_at(c('base_units','current_units',
+                 'base_revenue', 'current_revenue',
+                 'base_cost_total','current_cost_total',
+                 'base_gross_profit_total','current_gross_profit_total'), sum, na.rm = T) %>%
+  mutate(base_cost_per_unit = base_cost_total / base_units ,
+         current_cost_per_unit = current_cost_total / current_units,
+         base_gp_per_unit = base_gross_profit_total / base_units ,
+         current_gp_per_unit = current_gross_profit_total / current_units,
+         base_price = base_revenue / base_units ,
+         current_price = current_revenue / current_units,
+         base_mix = base_units / sum(base_units),
+         current_mix = current_units / sum(current_units),
+         fcst_units = base_mix * sum(current_units),
+         delta_to_fcst_units = current_units - fcst_units,
+         gp_mix_impact = (base_gp_per_unit - sum(base_gross_profit_total) / sum(base_units)) * delta_to_fcst_units,
+         gp_volume_impact = (current_units - base_units) * (sum(base_gross_profit_total) / sum(base_units)),
+         revenue_mix_impact = (base_price - sum(base_revenue) / sum(base_units)) * delta_to_fcst_units,
+         revenue_volume_impact = (current_units - base_units) * (sum(base_revenue) / sum(base_units)),
+         price_impact = (current_price - base_price) * current_units,
+         cost_impact = -(current_cost_per_unit - base_cost_per_unit) * current_units) %>% ungroup() %>%
+  mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
+  select(product, base_gross_profit_total, current_gross_profit_total, base_revenue, current_revenue, 
+         gp_mix_impact:gross_profit_change)
 
-# You use this approach if you want to explain drivers of total company performance
+
+
+product_level_decomp_summary = product_level_decomp %>% summarise_if(is.numeric, sum, na.rm = T) %>% 
+  mutate(gross_profit_change = gp_mix_impact + gp_volume_impact + price_impact + cost_impact) %>%
+  mutate(product = 'All Products') %>% select(product, everything()) %>%
+  bind_rows(product_level_decomp) %>% 
+  mutate_if(is.numeric, ~ round(.x, 0))   %>%
+  mutate(gross_profit_change = if_else(product == 'All Products', gross_profit_change, as.numeric(NA)))
+
+
+
+
+# Visual of Level 4 (Product) GP $ decomp ----
+
+l4_visual <- product_level_decomp_summary %>% select(-one_of(c('base_revenue', 'current_revenue', 'revenue_mix_impact', 'revenue_volume_impact'))) %>% 
+  select(product, base_gross_profit_total, current_gross_profit_total, gross_profit_change, everything()) %>%
+  gt(rowname_col = 'product') %>% cols_align(align = 'center') %>%
+  tab_spanner(label = "GP$ Change Decomposition", columns = c('price_impact', 'cost_impact', 'gp_volume_impact', 'gp_mix_impact')) %>%
+  fmt_currency(
+    columns = vars(base_gross_profit_total, current_gross_profit_total, gross_profit_change, price_impact, cost_impact, gp_volume_impact, gp_mix_impact),
+    currency = "USD",
+    decimals = 0
+  ) %>% 
+  cols_label(
+    base_gross_profit_total = 'GP$ in Base Period',
+    current_gross_profit_total = 'GP$ in Current Period',
+    gross_profit_change  = 'GP$ Change',
+    price_impact = 'Price',
+    cost_impact= 'Cost',
+    gp_volume_impact= 'Volume',
+    gp_mix_impact= 'Product Mix'
+  ) %>%
+  tab_header(
+    title = md(paste("Price-Cost-Volume-Mix Decomposition of ", brand_filter, " brand"))
+  ); l4_visual  
+
+
+
+
+
 
 
