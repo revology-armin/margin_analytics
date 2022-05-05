@@ -1,0 +1,1028 @@
+---
+title: "Price Optimization Part 1: Methods for Price Elasticities for Consumer Products companies"
+author: "Revology Analytics"
+date: "5/4/2022"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float: false
+    toc_depth: 3
+    df_print: paged
+css: "hide_button_style.css"
+---
+
+
+
+```{css, echo=FALSE}
+pre {
+  max-height: 600px;
+  overflow-y: auto;
+
+}
+
+pre[class] {
+  max-height: 600px;
+
+}
+
+
+```
+
+<script src="C:/Users/armin/OneDrive/Documents/GitHub/margin_analytics/hideOutput.js"></script>
+
+
+# Load key packages and useful functions 
+
+We'll get started by loading some key libraries and writing baseline functions that we'll be using throughout our analysis. You can expand or collapse the **source code** for each section by clicking on the blue tabs.   
+
+<div class="fold s">
+```{r packages, warning=FALSE, message=FALSE}
+options(width = 1000)
+knitr::opts_chunk$set(echo = TRUE, cache= TRUE, tidy = TRUE)
+
+library(lazyeval)
+library(knitr)
+library(vip)
+library(gt)
+library(data.table)
+library(corrplot)
+library(ggthemes)
+library(ggrepel)
+library(ggpubr)
+library(readxl)
+library(skimr)
+library(prophet)
+library(forecast)
+library(anytime)
+library(doParallel)
+library(scales)
+library(gridExtra)
+library(plotly)
+library(timeDate)
+library(tidyverse)
+library(tidymodels)
+library(DataExplorer)
+
+
+# 1. Baseline functions ---------------------------------------------------
+
+header_changes = function(mydata){
+  setnames(mydata, names(mydata), tolower(names(mydata)))
+  setnames(mydata, names(mydata), gsub(" ","_", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("_(sum)","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("_(agg)","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("_(avg)","_avg", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("(c)","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("$","dollar_volume", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("%","pct", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("w/o","without", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("-","_", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("&","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("/","_", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("\\(","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub("\\)","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), gsub(".","", names(mydata), fixed = TRUE))
+  setnames(mydata, names(mydata), iconv(names(mydata), "UTF-8","ASCII", sub=""))
+}
+
+
+`%ni%` = Negate('%in%')  
+
+
+#function to round any number to the desired decimal interval (i.e. 4.28 to 4.50)
+round_to_decimal <- function(x,decimal){
+  y=x/decimal
+  z=round(y)
+  z*decimal
+}
+
+#quantile calculations
+quantile_25 = function(x){quantile(x, 0.25)}
+quantile_75 = function(x){quantile(x, 0.75)}
+quantile_90 = function(x){quantile(x, 0.90)}
+
+
+### Function to calculate rmse ################
+rmse_calc = function(df){
+  
+  sqrt(mean((df$.fitted - df$units)^2))
+  
+}
+
+
+### Function to calculate rmse with log-log regression ################
+
+rmse_log = function(df){
+  
+  sqrt(mean((exp(df$.fitted) - exp(df$`log(units + 1)`))^2))
+  
+}
+
+
+
+round_2 = function(x) (round(x, 2)) 
+
+
+### Function for messy string cleaning ################
+clean_text <- function(x) {
+  x %>%
+    str_remove_all("^RT:? ") %>%
+    str_remove_all(" ?(f|ht)(tp)(s?)(://)(.*)[.|/](.*)") %>%
+    str_replace_all("&amp;", "and") %>%
+    str_remove_all("[[:punct:]]") %>%
+    str_remove_all("@[[:alnum:]]+") %>%
+    str_remove_all("#[[:alnum:]]+") %>%
+    str_replace_all("\\\n", " ") %>%
+    str_to_lower() %>%
+    str_trim("both") %>%
+    str_replace_all("brt", " ") 
+}
+
+
+### Function to adjust elasticity estimates to 0 if the model outputs a positive number  ################
+elast_adjust = function(x){
+  if_else(x > 0 ,0,x)
+}
+
+
+### Function to obtain variable importance plots ################
+varimp_plots = function(model){
+  vip(model, scale = TRUE, num_features =25) 
+}
+
+
+### Function to obtain variable importance scores ################
+varimp_scores = function(model){
+  vi(model, scale = TRUE, ice = T)
+}
+
+
+```
+</div>
+
+
+
+# Data prepping for analysis and modeling 
+
+
+<div class="fold s">
+```{r dataprep_1, warning=FALSE, message = FALSE, cache=TRUE}
+data = readRDS('C:/Users/armin/OneDrive/Documents/GitHub/margin_analytics/cpg_retail_data_example_A.rds')
+data$date <- as.Date(data$date)
+data$promo_price <- NULL
+
+```
+</div>
+
+
+
+
+## Create key pricing and margin metrics
+
+<div class="fold s">
+```{r dataprep_2, warning=FALSE, message = FALSE, cache=TRUE, tidy=TRUE}
+
+
+data = data %>% mutate(
+  year  = lubridate::year(date),
+  avg_selling_price = sales_dollars / units,
+  gp_per_unit = avg_selling_price - cost_per_unit,
+  gp_pct = gp_per_unit / avg_selling_price,
+  gp_dollars = sales_dollars * gp_pct,
+  pct_units_sold_on_promo = promo_units / units,
+  pct_units_feature = (feature_units) / units,
+  pct_units_display = (display_units) / units
+) %>%
+  mutate_at(vars(contains('price')), round_2) %>% na.omit() %>%
+  group_by(retailer, product, year) %>%
+  mutate(
+    price_ratio_vs_med = avg_selling_price / median(avg_selling_price, na.rm = T),
+    price_ratio_vs_mean = avg_selling_price /
+      mean(avg_selling_price, na.rm = T)
+  ) %>% ungroup()
+
+
+
+#keep only those products that have at least 104 weeks of sales history
+#focus on the ones with the biggest price variation
+retailer_filtering = data %>% group_by(retailer, product) %>% summarise(
+  price_var = sd(avg_selling_price) / mean(avg_selling_price),
+  units  = sum(units),
+  num_weeks = n(),
+  pct_units_feature = sum(feature_units, na.rm = T) / sum(units, na.rm = T),
+  pct_units_display = sum(display_units, na.rm = T) / sum(units, na.rm = T)
+) %>% ungroup() %>%
+  filter(num_weeks >= 104) %>% group_by(retailer) %>%
+  summarise(
+    price_var = mean(price_var),
+    num_weeks = mean(num_weeks),
+    num_products = n_distinct(product),
+    pct_units_feature = mean(pct_units_feature),
+    pct_units_display = mean(pct_units_display)
+  ) %>% ungroup()
+
+
+target_retailer = 'Pubyern'
+
+data = data %>% filter(retailer ==  target_retailer)
+
+focus_product_list =  unique(data$product)
+
+
+```
+</div>
+
+
+
+## Create holiday variables
+
+<div class="fold s">
+```{r dataprep_3, warning=FALSE, message = FALSE, cache=TRUE}
+
+superbowl = tibble(holiday = 'superbowl', date = as.Date(c('2014-02-02', '2015-02-01', '2016-02-07')))
+
+#Custom data frame of US holidays
+holidays = listHolidays("US")
+currentYear <- getRmetricsOptions("currentYear")
+holiday_years = tibble(year = currentYear:(currentYear - 10))
+
+holiday_df = tibble(holiday = holidays)  %>% crossing(holiday_years) %>%
+  rowwise() %>%
+  mutate(date = lazy_eval(paste0(
+    "as.Date(timeDate::", holiday, "(", year, "))"
+  ))) %>% rowwise() %>%
+  select(-year) %>% bind_rows(superbowl)
+
+
+holiday_df_before = holiday_df %>% mutate(date = date - 1)
+holiday_df_after = holiday_df %>% mutate(date = date + 1)
+holiday_df = holiday_df %>% bind_rows(holiday_df_after) %>% bind_rows(holiday_df_before) %>% arrange(holiday, date)
+
+
+#Create dummy variables
+holiday_matrix = holiday_df %>% mutate(count = 1) %>% spread(holiday, count)
+
+
+
+data = data %>% left_join(holiday_matrix) %>% replace(is.na(.), 0)
+  
+
+```
+</div>
+
+
+
+
+## Create dummy variable for promotion
+
+<div class="fold s">
+```{r dataprep_4, warning=FALSE, message = FALSE, cache=TRUE}
+
+#data %>% group_by(product) %>% skim(pct_units_display, pct_units_feature)
+
+#Determine what constitutes a promotion or a feature and display
+feature_or_display_unit_threshold = 1 / 3  #at least 33% of the stores/units have to be on feature or on display support
+
+
+data = data %>% mutate(
+  feature_or_display_promo  = if_else(
+    pct_units_feature >= feature_or_display_unit_threshold |
+      pct_units_display >= feature_or_display_unit_threshold,
+    1,
+    0
+  )
+)
+
+
+
+```
+</div>
+
+
+
+
+## Quick glimpse of our data
+
+
+````{=html}
+```{r dataprep_5a, echo=FALSE}
+data %>% head(n=3) %>% gt()
+```
+````
+
+
+
+
+
+## Create variables for seasonality 
+
+<div class="fold s">
+```{r dataprep_6, warning=FALSE, message = FALSE, cache=TRUE}
+
+
+#Understand seasonality at the category level (ice pops)
+#use forecast package to extract fourier terms https://rdrr.io/cran/forecast/man/fourier.html
+#msts data: https://robjhyndman.com/hyndsight/seasonal-periods/
+#loop through various orders for fourier terms and the RMSE for the best one
+
+
+data_prophet_cat = data %>% group_by(date) %>% summarise(units = sum(units, na.rm = T)) %>% ungroup() %>%
+  select(date, units) %>% rename(ds = date, y = units)
+
+min_date = as.Date(min(data_prophet_cat$ds))
+num_periods = length(unique(data_prophet_cat$ds))
+
+train = 0.7 #training data portion
+train_periods = ceiling(train * num_periods)
+
+validation_periods = num_periods - train_periods # number of weeks used in validation data
+
+
+data_p_train = data_prophet_cat %>% filter(ds <= (min_date + ((train_periods -
+                                                                 1) * 7)))
+data_p_validation = data_prophet_cat %>% anti_join(data_p_train, by = 'ds')
+
+
+library(doParallel)
+registerDoParallel(cores = detectCores() - 2)
+
+fourier_term_ranking = foreach(
+  i = 3:20,
+  .combine = rbind,
+  .packages = c('prophet', 'forecast', 'tidyverse')
+) %dopar% {
+  ts_m <- prophet(data_p_train,  yearly.seasonality = T)
+  ts_m <-
+    prophet(weekly.seasonality = F)
+  ts_m <-
+    add_seasonality(ts_m,
+                    name = 'yearly',
+                    fourier.order = i,
+                    period = 365.25)
+  ts_m = fit.prophet(ts_m, data_p_train)
+  
+  ts_m_future <-
+    make_future_dataframe(ts_m, periods = validation_periods, freq = 'week')
+  
+  forecast <-
+    predict(ts_m, ts_m_future)
+  forecast$ds <- as.Date(forecast$ds)
+  
+  data_p_validation_small = data_p_validation %>% inner_join(select(forecast, ds, yhat))
+  
+  rmse = sqrt(mean((data_p_validation_small$y - data_p_validation_small$yhat) ^2))
+  fourier_terms_s = tibble(K = i, rmse = rmse)
+  
+  fourier_terms_s
+}
+
+
+fourier_term_optimal = fourier_term_ranking$K[which.min(fourier_term_ranking$rmse)]
+
+data_ts = data_prophet_cat %>% arrange(ds)
+
+data_ts = ts(data_ts$y,
+             freq = 365.25 / 7,
+             start = lubridate::decimal_date(lubridate::ymd(min(data_ts$ds))))
+
+data_msts = msts(data_ts, seasonal.periods =  365.25 / 7)
+
+fourier_series = fourier(data_msts, K = fourier_term_optimal) %>%
+  data.frame()  #fourier series to be used in our models
+
+
+#create fourier series data set for later use
+
+fourier_series_df = data_prophet_cat %>% rename(date = ds) %>% select(-y) %>%
+  arrange(date) %>%
+  bind_cols(fourier_series) %>%
+  nest(fourier_values = matches('.52'))
+            
+
+```
+</div>
+
+<a style="font-weight:bold" href="#top">Back to Table of Contents</a> 
+
+
+
+# Visualize unit sales and profitability trends
+
+
+
+## View key cost, pricing and margin stats by product
+
+<div class="fold s">
+```{r visual_1, warning=FALSE, message = FALSE, cache=TRUE}
+
+price_summary_by_prod = data %>% select(product, cost_per_unit, avg_selling_price, gp_per_unit, gp_pct) %>%
+  pivot_longer(-product, names_to = 'metrics', values_to = 'values') %>%
+  group_by(product, metrics) %>%
+  summarise_all(
+    list(
+      min = min,
+      quantile_25 = quantile_25,
+      median = median,
+      quantile_75 = quantile_75,
+      max = max
+    )
+  ) %>%
+  pivot_longer(-c(product, metrics),
+               names_to = 'stats',
+               values_to = 'values') %>%
+  pivot_wider(names_from = 'metrics', values_from = 'values')
+
+
+#View list of most important variables by product
+price_summary_by_prod %>%
+  gt(rowname_col = 'stats', groupname_col = 'product') %>% cols_align(align = 'center') %>%
+  tab_spanner(label = "Key Pricing and Profitability Metrics", 
+                columns = c('avg_selling_price','cost_per_unit', 'gp_per_unit', 'gp_pct')) %>%
+  fmt_currency(
+    columns = vars(avg_selling_price, cost_per_unit, gp_per_unit),
+    currency = "USD"
+  ) %>% 
+  fmt_percent(
+    columns = vars(gp_pct),
+    decimals = 0
+  ) %>% 
+  cols_label(
+    avg_selling_price = 'Avg. Selling Price',
+    cost_per_unit = 'Cost/Unit',
+    gp_pct  = "Gross Profit Pct",
+    gp_per_unit = "GP$/Unit"
+  ) %>%
+  tab_header(
+    title = md("*Summary Stats**")
+  )
+
+```
+</div>
+
+<a style="font-weight:bold" href="#top">Back to Table of Contents</a> 
+
+
+## Average Selling Price (ASP), Profitability, Units and Seasonality trends
+
+
+<div class="fold s">
+```{r visual_2, warning=FALSE, message = FALSE, results = 'hide',cache=TRUE}
+
+# Explore ASP, Units and seasonality trends =====
+
+price_units_visual = function(prod_filter){
+  
+          data_filtered = data %>% filter(product == prod_filter) %>% 
+            group_by(product, date) %>% summarise(units = sum(units, na.rm = T)) %>% 
+            ungroup() %>% arrange(date)
+          
+          data_prophet = data_filtered %>%
+            select(date, units) %>% rename(ds = date, y = units)
+          
+          
+          min_date = as.Date(min(data_prophet$ds))
+          num_periods = length(unique(data_prophet$ds))
+          
+          train = 0.7 #training data portion
+          train_periods = ceiling(train * num_periods)
+          
+          validation_periods = num_periods -train_periods # number of weeks used in validation data
+          
+          
+          data_p_train = data_prophet %>% filter(ds <= (min_date + ((train_periods-1)*7)))
+          data_p_validation = data_prophet %>% anti_join(data_p_train, by = 'ds')
+          
+          fourier_term_optimal = fourier_series_df %>% 
+            sample_n(1) %>% unnest(cols = c('fourier_values'))
+          
+          fourier_term_optimal = (dim(fourier_term_optimal)[2]-2)/2
+          
+          ts_m <- prophet(data_p_train,  yearly.seasonality = T)
+          ts_m <- prophet(weekly.seasonality = F)
+          ts_m <- add_seasonality(ts_m, name = 'yearly', fourier.order = fourier_term_optimal, period = 365.25)
+          ts_m = fit.prophet(ts_m, data_p_train)
+          
+          ts_m_future <- make_future_dataframe(ts_m, periods = validation_periods, freq = 'week')
+          
+          forecast <- predict(ts_m, ts_m_future)
+          
+          
+          ### Plot the seasonality ################
+          pe_good_plot_seasonality = prophet_plot_components(ts_m, forecast, render_plot = F)[[2]]    #seasonality plot
+          
+          
+          pe_good_plot_seasonality = pe_good_plot_seasonality +
+            scale_y_continuous(name= 'Units', labels = scales::comma_format()) +
+            ggtitle("Annual seasonality") +
+            theme(axis.title.y = element_text(color = 'grey23', size=14),
+                  axis.title.x = element_text(color = 'grey23', size=14),
+                  axis.text.x = element_text(size = 10),
+                  axis.text.y = element_text(size = 14),
+                  plot.title = element_text(vjust=1, 
+                                            colour="black",
+                                            size = 14,
+                                            face="bold"),
+                  legend.title = element_blank(), legend.position = "none")
+          
+          
+          
+          ### Plot price vs. units relationship ################
+          data_filtered =   data %>% filter(product == prod_filter)
+          
+          
+          pe_good_plot_cor  <- ggplot(data_filtered, aes(avg_selling_price, units)) +
+            geom_point(aes(color = "black"), shape = 21, fill = "white", size = 3, stroke = 1.5) + 
+            scale_x_continuous(name = 'Price', labels = scales::dollar_format(decimal = ".")) + 
+            scale_y_continuous(name= 'Units', labels = scales::comma_format()) +
+            geom_smooth(method = 'loess', se = T, color = "darkgrey") + 
+            theme_fivethirtyeight() +    
+            ggtitle("Price vs. Units response") +
+            scale_color_economist() +   
+            theme(axis.title.y = element_text(color = 'grey23', size=14),
+                  axis.title.x = element_text(color = 'grey23', size=14),
+                  axis.text = element_text(size = 14),
+                  plot.title = element_text(vjust=1, 
+                                            colour="black",
+                                            size = 14,
+                                            face="bold"),
+                  legend.title = element_blank(), legend.position = "none")
+          
+          
+          
+          ### Plot gross profit by month ################
+          
+          data_filtered =   data %>% filter(product == prod_filter) %>% 
+            mutate(year_month = lubridate::floor_date(date, 'month')) %>%
+            group_by(year_month) %>%
+            summarise(gp_dollars = sum(gp_dollars, na.rm= T),
+                      units = sum(units, na.rm = T)) %>% ungroup()
+          
+          
+          pe_good_plot_gp  <- ggplot(data_filtered, aes(as.Date(year_month), gp_dollars)) +
+            geom_col(aes(color = "black"),  fill = "red") + 
+            scale_x_date(name = 'Date') + 
+            scale_y_continuous(name = 'Gross Profit $', labels = scales::dollar_format(),
+                   limits = c(min(data_filtered$gp_dollars-1), max(data_filtered$gp_dollars+1)),
+                   oob = rescale_none) +
+            theme_economist() +    
+            ggtitle('Monthly Gross Profit $') +
+            scale_color_economist() +        
+            theme(axis.title.y = element_text(color = 'grey23', size=14),
+                  axis.title.x = element_text(color = 'grey23', size=14),
+                  axis.text = element_text(size = 14),
+                  plot.title = element_text(vjust=1, 
+                                            colour="red",
+                                            size = 14,
+                                            face="bold"),
+                  legend.title = element_blank(), legend.position = "none")
+          
+          
+          
+          pe_good_plot_units <- ggplot(data_filtered, aes(as.Date(year_month), units)) +
+            geom_col(aes(color = "black"),  fill = "blue") + 
+            scale_x_date(name = 'Date') + 
+            scale_y_continuous(name = 'Units', labels = scales::comma_format(),
+                               limits = c(min(data_filtered$units-1), max(data_filtered$units+1)),
+                               oob = rescale_none) +
+            theme_economist() +    
+            ggtitle('Monthly Unit Sales') +
+            scale_color_economist() +        
+            theme(axis.title.y = element_text(color = 'grey23', size=14),
+                  axis.title.x = element_text(color = 'grey23', size=14),
+                  axis.text = element_text(size = 14),
+                  plot.title = element_text(vjust=1, 
+                                            colour="blue",
+                                            size = 14,
+                                            face="bold"),
+                  legend.title = element_blank(), legend.position = "none")
+          
+          
+          figure1 <- ggarrange(pe_good_plot_units, pe_good_plot_seasonality,
+                               pe_good_plot_gp, pe_good_plot_cor,
+                               ncol = 2, nrow = 2)
+          
+          figure1 <-  annotate_figure(figure1,
+                      #top = text_grob(paste(prod_filter), color = "red", face = "bold", size = 14),
+                      bottom = text_grob("revology.ai", color = "darkgrey",
+                                         hjust = 1, x = 1, face = "bold", size = 11),
+                      top = text_grob("", color = "darkgrey",
+                                      hjust = 1, x = 1, face = "bold", size = 18),
+                      fig.lab = paste0(prod_filter), fig.lab.face = 'bold', fig.lab.size = 18)
+          
+          print(figure1)   }
+
+```
+</div>  
+
+
+
+
+### Product level analysis {.tabset}
+
+#### Chocolat baby 10 count ice pops
+
+Key pricing and profitability trends
+```{r visual_3, warning=FALSE, message = FALSE,cache=TRUE, fig.height=9, fig.width = 11, echo=FALSE}
+
+price_units_visual('Chocolat baby 10 count ice pops')
+
+```
+
+
+#### Vanilla diva 16 count ice pops
+Key pricing and profitability trends
+```{r visual_4, warning=FALSE, message = FALSE,cache=TRUE,  fig.height=9, fig.width = 11, echo=FALSE}
+price_units_visual('Vanilla diva 16 count ice pops')
+
+```
+
+
+#### Vanilla diva 18 count ice pops
+Key pricing and profitability trends
+```{r visual_5, warning=FALSE, message = FALSE, cache=TRUE,  fig.height=9, fig.width = 11, echo=FALSE}
+
+price_units_visual('Vanilla diva 18 count ice pops')
+
+```
+
+<a style="font-weight:bold" href="#top">Back to Table of Contents</a> 
+
+
+
+
+
+# Understand variable importance
+
+
+
+## Which predictors are the most important?
+
+
+<div class="fold s">
+```{r varimp_1, warning=FALSE, message = FALSE,cache=TRUE,  fig.height=9, fig.width = 11}
+
+
+# Create initial data set for variable importance =====
+
+by_product_data_reg = data %>% 
+              select(product, date, units, avg_selling_price, feature_or_display_promo, superbowl:USWashingtonsBirthday) %>%
+                       inner_join(fourier_series_df) %>% unnest(cols = 'fourier_values') %>%
+                              select(-date) 
+  
+by_product_data_reg$product <- factor(by_product_data_reg$product)
+
+
+# Variable importance =====
+
+### Run basic Random Forest model ################
+rf_basic <- rand_forest(mode = "regression", mtry = floor(sqrt(.preds())), trees = 1000) %>%
+    set_engine("ranger", importance = 'permutation') %>%
+    fit(
+      units  ~ . ,
+      data = by_product_data_reg) 
+
+
+
+
+### Variable importance plots ################
+
+
+varimp_score =  varimp_scores(rf_basic)
+
+varimp_ggplot <- varimp_plots(rf_basic) + 
+      scale_y_continuous(name= 'Variable Importance (max = 100)', labels = scales::comma_format()) +
+      ggtitle("Variable Importance Plot") +
+      theme(axis.title.y = element_text(color = 'grey23', size=12),
+            axis.title.x = element_text(color = 'grey23', size=16),
+            axis.text = element_text(size = 14),
+            plot.title = element_text(vjust=1, 
+                                      colour="red",
+                                      size = 14,
+                                      face="bold"),
+            legend.title = element_blank(), legend.position = "none")
+    
+  
+varimp_ggplot
+
+```
+</div> 
+
+
+
+## Create final data set for linear regressions
+
+
+
+<div class="fold s">
+```{r varimp_2, warning=FALSE, message = FALSE, cache=TRUE}
+
+
+
+by_product_data_reg_final = tibble()
+
+for(i in seq_along(focus_product_list)){
+  data_filtered  = data %>% filter(product == focus_product_list[i]) %>% 
+    select(product, date, units, avg_selling_price, feature_or_display_promo)
+  
+  data_filtered = data_filtered %>% inner_join(fourier_series_df) %>%
+    unnest(cols = 'fourier_values') %>%
+    select(-date) %>% group_by(product) %>% nest()
+  
+  by_product_data_reg_final = data_filtered %>% bind_rows(by_product_data_reg_final)
+  
+}
+
+by_product_data_reg_final
+
+```
+</div>
+
+
+Let's see how the regression data set looks like for **Vanilla diva 18 count ice pops**:
+
+<div class="fold s">
+```{r varimp_3, warning=FALSE, message = FALSE, cache=TRUE}
+
+by_product_data_reg_final %>% filter(product == 'Vanilla diva 18 count ice pops') %>%
+  unnest(cols = c('data')) %>% ungroup() %>% select(-product) %>% head() %>% mutate_at(vars(matches('.52')), round_2) %>%
+        gt() %>% cols_align(align = 'center') %>% 
+        tab_spanner(label = "Fourier terms", 
+            columns = c('S1.52' ,'C1.52','S2.52' ,'C2.52','S3.52' ,
+                        'C3.52' ,'S4.52' ,'C4.52','S5.52', 'C5.52', 'S6.52' ,'C6.52')) %>%
+            tab_header(
+              title = md("**Data used for price elasticity modeling**"),
+              subtitle = md("Vanilla diva 18 count ice pops; first 6 of 104 observations"))
+
+
+```
+</div>
+
+<a style="font-weight:bold" href="#top">Back to Table of Contents</a>  
+
+
+
+
+# The "Good" approach for estimating own Price Elasticity (aka. "mid-point method")
+
+
+## About the mid-point method
+
+
+## Understand the need for interaction between promotional events and prices
+
+
+<div class="fold s">
+```{r good_1, warning=FALSE, message = FALSE, cache=TRUE}
+
+
+feature_display_promo_stats = by_product_data_reg_final %>% unnest(cols = c('data')) %>% 
+            group_by(product, feature_or_display_promo) %>% 
+                        summarise(avg_selling_price = round(mean(avg_selling_price, na.rm = T),2),
+                                  avg_units = round(mean(units, na.rm = T),0),
+                                  num_weeks = n()) %>% ungroup() %>%
+                pivot_wider(names_from = feature_or_display_promo, values_from = c(avg_selling_price, avg_units, num_weeks)) %>%
+                      mutate(promo_units_ratio = round(avg_units_1/avg_units_0,1),
+                             pct_weeks_on_promotion = num_weeks_1/num_weeks_0)  %>%
+                       rename(regular_price = avg_selling_price_0,
+                              promo_price = avg_selling_price_1,
+                              regular_weekly_units = avg_units_0,
+                              promo_weekly_units = avg_units_1) %>% select(-num_weeks_1, -num_weeks_0)
+
+feature_display_promo_stats %>%
+  gt() %>% cols_align(align = 'center')  %>% 
+  fmt_currency(
+    columns = vars(regular_price, promo_price),
+    currency = "USD"
+  ) %>% 
+  fmt_number(
+    columns = vars(regular_weekly_units, promo_weekly_units),
+    decimals = 0, sep_mark = ","
+  ) %>%
+    fmt_percent(
+      columns = vars(promo_units_ratio, pct_weeks_on_promotion),
+      decimals = 0
+    ) %>% 
+  cols_label(
+    regular_price = 'Regular Price',
+    promo_price = 'Promo Price',
+    regular_weekly_units = "Avg. Weekly Units (Regular Week, No Promotion)",
+    promo_weekly_units = "Avg. Weekly Units (Promotion)",
+    promo_units_ratio = "Promo vs. Non-Promo Week Unit Ratio",
+    pct_weeks_on_promotion =  "Pct of Weeks with Promotions"
+  ) %>%
+  tab_header(
+    title = md("**Avg. weekly prices and units during regular vs. feature/display promotional weeks**")) %>%
+  tab_source_note(md("Promotional event is defined by `feature_or_display_promo` flag = 1"))
+
+
+
+```
+</div>
+
+
+
+## Build model  
+
+### Include interaction term between feature/display promotion and price
+
+
+<div class="fold s">
+```{r good_2, warning=FALSE, message = FALSE, cache=TRUE}
+#includes interaction term between promo event and price
+by_product_data_reg_final =  by_product_data_reg_final %>%
+                  mutate(pe_good_model = purrr::map(data, ~lm(units ~ avg_selling_price*feature_or_display_promo +., data = .x)),
+                         pe_good_model_coefs = purrr::map(pe_good_model, tidy),
+                         pe_good_model_summary = purrr::map(pe_good_model, glance),
+                         pe_good_model_details = purrr::map(pe_good_model, augment))
+
+by_product_data_reg_final
+
+```
+</div>
+
+
+
+### Model stats
+
+<div class="fold s">
+```{r good_3, warning=FALSE, message = FALSE, cache=TRUE}
+pe_good_model_summary = by_product_data_reg_final %>% unnest(pe_good_model_summary) %>%
+                   select(-data, -pe_good_model, -pe_good_model_coefs)
+
+pe_good_model_summary
+
+
+pe_good_model_coefs = by_product_data_reg_final %>% unnest(pe_good_model_coefs) %>%
+                        select(-data, -pe_good_model, -pe_good_model_summary) %>%
+                                filter(grepl('price|promo', term, ignore.case = T))
+
+pe_good_model_coefs
+```
+</div>
+
+
+### Adjust coefficients for interactions
+
+<div class="fold s">
+```{r good_4, warning=FALSE, message = FALSE, cache=TRUE}
+pe_good_model_coefs_2 = pe_good_model_coefs %>%
+          select(product, term, estimate) %>% 
+                  pivot_wider(names_from = term, values_from = estimate) %>%
+          rename(price_coef_regular = avg_selling_price) %>%
+                mutate(price_coef_promotion = price_coef_regular+`avg_selling_price:feature_or_display_promo`)
+
+pe_good_model_coefs_2
+
+```
+</div>
+
+
+
+### Estimate elasticities
+
+<div class="fold s">
+```{r good_5, warning=FALSE, message = FALSE, cache=TRUE}
+pe_good_estimate = pe_good_model_coefs_2 %>%
+            select(price_coef_regular, price_coef_promotion) %>%
+              inner_join(feature_display_promo_stats) %>% ungroup() %>% 
+                  mutate(price_elasticity_regular = (regular_price/regular_weekly_units)*price_coef_regular,
+                         price_elasticity_promo = (promo_price/promo_weekly_units)*price_coef_promotion) %>%
+                            select(product, price_elasticity_regular, price_elasticity_promo) %>%
+                  mutate_at(.vars = c('price_elasticity_regular','price_elasticity_promo'), .funs = elast_adjust)
+                          
+pe_good_estimate
+
+```
+</div>
+
+
+### Model accuracy on training data (and why just on training data?)
+
+<div class="fold s">
+```{r good_6, warning=FALSE, message = FALSE, cache=TRUE}
+by_product_data_reg_final <- by_product_data_reg_final %>% 
+                             mutate(pe_good_model_rmse = purrr::map(pe_good_model_details, rmse_calc)) 
+
+
+by_product_data_reg_final %>% select(product, pe_good_model_rmse) %>% unnest(cols = c('pe_good_model_rmse'))
+
+```
+</div>
+
+
+<a style="font-weight:bold" href="#top">Back to Table of Contents</a> 
+
+
+
+# The "Better" approach for estimating own Price Elasticity (aka. "log-log method")
+
+## About the log-log method
+
+
+## Build model  
+
+<div class="fold s">
+```{r better_1, warning=FALSE, message = FALSE, cache=TRUE}
+
+#includes interaction term between promo event and price
+by_product_data_reg_final =  by_product_data_reg_final %>% 
+  mutate(pe_better_model = purrr::map(data, ~lm(log(units+1) ~ . + 
+      log(avg_selling_price)*feature_or_display_promo - avg_selling_price, data = .x)),
+         pe_better_model_coefs = purrr::map(pe_better_model, tidy),
+         pe_better_model_summary = purrr::map(pe_better_model, glance),
+         pe_better_model_details = purrr::map(pe_better_model, augment))
+
+by_product_data_reg_final %>% select(-matches('pe_good_model'))
+
+```
+</div>
+
+### Model stats
+
+<div class="fold s">
+```{r better_2, warning=FALSE, message = FALSE, cache=TRUE}
+pe_better_model_summary = by_product_data_reg_final %>% unnest(pe_better_model_summary) %>%
+  select(-data, -pe_better_model, -pe_better_model_coefs)  %>% select(-matches('pe_good_model'))
+
+pe_better_model_summary
+
+
+pe_better_model_coefs = by_product_data_reg_final %>% unnest(pe_better_model_coefs) %>%
+  select(-data, -pe_better_model, -pe_better_model_summary) %>%
+  filter(grepl('price|promo', term, ignore.case = T)) %>%  select(-matches('pe_good_model'))
+
+pe_better_model_coefs
+
+```
+</div>
+
+
+### Estimate elasticities
+
+<div class="fold s">
+```{r better_3, warning=FALSE, message = FALSE, cache=TRUE}
+
+pe_better_estimate = pe_better_model_coefs %>%
+  select(product, term, estimate) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  rename(price_elasticity_regular = `log(avg_selling_price)`) %>%
+  mutate(price_elasticity_promo = price_elasticity_regular + 
+           `feature_or_display_promo:log(avg_selling_price)`) %>%
+  select(product, price_elasticity_regular, price_elasticity_promo) %>%
+  mutate_at(.vars = c('price_elasticity_regular','price_elasticity_promo'), .funs = elast_adjust)
+
+pe_better_estimate
+
+```
+</div>
+
+
+
+### Model accuracy on training data
+
+<div class="fold s">
+```{r better_4, warning=FALSE, message = FALSE, cache=TRUE}
+
+
+by_product_data_reg_final <- by_product_data_reg_final %>% 
+  mutate(pe_better_model_rmse = purrr::map(pe_better_model_details, rmse_log)) 
+
+by_product_data_reg_final %>% select(product, pe_good_model_rmse, pe_better_model_rmse) %>% 
+  unnest(cols = c('pe_good_model_rmse', 'pe_better_model_rmse'))
+ 
+
+```
+</div>
+
+
+<a style="font-weight:bold" href="#top">Back to Table of Contents</a> 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Additional Resources
+Introduction to Machine Learning with the Tidyverse: https://education.rstudio.com/blog/2020/02/conf20-intro-ml/
+Gentle introduction to tidymodels: https://rviews.rstudio.com/2019/06/19/a-gentle-intro-to-tidymodels/
+Prophet for ts forecasting and seasonal decomposition: https://facebook.github.io/prophet/docs/quick_start.html#r-api
+
+
+
+
